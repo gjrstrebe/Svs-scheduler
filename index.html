@@ -153,6 +153,30 @@
     </main>
 
     <!-- ========================================== -->
+    <!-- SECTION: Slot Detail Modal                 -->
+    <!-- ========================================== -->
+    <div id="slotDetailModal" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg p-6 shadow-2xl relative">
+            <button onclick="closeSlotDetailModal()" class="absolute top-4 right-4 text-slate-400 hover:text-white">
+                <i class="fa-solid fa-xmark text-lg"></i>
+            </button>
+            <div class="flex items-center gap-2 mb-1">
+                <span class="text-xs font-bold text-cyan-400 font-mono bg-cyan-950/80 border border-cyan-800/80 px-2 py-0.5 rounded" id="detailModalTime">--:--</span>
+                <span class="text-xs text-slate-400" id="detailModalDay">Day 1</span>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-4">Slot Entries & Status Breakdown</h3>
+
+            <div id="detailEntriesContainer" class="space-y-3 max-h-80 overflow-y-auto">
+                <!-- Populated dynamically when clicking a slot -->
+            </div>
+
+            <div class="mt-6 pt-3 border-t border-slate-800 flex justify-end">
+                <button onclick="closeSlotDetailModal()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs rounded-lg transition-all">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ========================================== -->
     <!-- SECTION: Footer                            -->
     <!-- ========================================== -->
     <footer class="border-t border-slate-800 bg-slate-950 py-6 text-slate-400 text-xs">
@@ -498,11 +522,12 @@
                 const alternates = sorted.slice(1);
 
                 const card = document.createElement('div');
-                card.className = `p-3.5 rounded-xl border flex flex-col justify-between transition-all ${
+                card.className = `p-3.5 rounded-xl border flex flex-col justify-between transition-all cursor-pointer hover:border-cyan-500/60 ${
                     primary 
                         ? 'bg-slate-900/90 border-slate-700' 
                         : 'bg-slate-950/40 border-slate-800/60 hover:border-slate-700'
                 }`;
+                card.setAttribute('onclick', `openSlotDetailModal(${i})`);
 
                 let cardContent = `
                     <div>
@@ -552,6 +577,82 @@
                 grid.appendChild(card);
             }
         }
+
+        // --- Slot Details Modal Logic ---
+        window.openSlotDetailModal = function(slotIndex) {
+            const requests = scheduleData[window.currentDay][slotIndex] || [];
+            const sorted = [...requests].sort((a, b) => b.score - a.score || a.timestamp - b.timestamp);
+
+            const titles = {
+                1: "Day 1: City Construction",
+                4: "Day 4: Troop Training",
+                5: "Day 5: Research"
+            };
+
+            document.getElementById('detailModalTime').innerText = formatSlotTime(slotIndex);
+            document.getElementById('detailModalDay').innerText = titles[window.currentDay];
+
+            const container = document.getElementById('detailEntriesContainer');
+            container.innerHTML = '';
+
+            if (sorted.length === 0) {
+                container.innerHTML = `
+                    <div class="p-6 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-xl">
+                        No players have requested this time slot yet.
+                    </div>
+                `;
+            } else {
+                sorted.forEach((req, idx) => {
+                    const isPrimary = idx === 0;
+                    const card = document.createElement('div');
+                    card.className = `p-3.5 rounded-xl border ${
+                        isPrimary 
+                            ? 'bg-emerald-950/20 border-emerald-500/40' 
+                            : 'bg-slate-950 border-slate-800'
+                    }`;
+
+                    let speedupLabel = "Construction";
+                    if (window.currentDay === 4) speedupLabel = "Training";
+                    if (window.currentDay === 5) speedupLabel = "Research";
+
+                    card.innerHTML = `
+                        <div class="flex justify-between items-center mb-2">
+                            <div class="flex items-center gap-2">
+                                <span class="font-bold text-sm text-white">[${req.allianceTag}] ${req.playerName}</span>
+                                ${isPrimary 
+                                    ? `<span class="text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded">Primary Slot Holder</span>` 
+                                    : `<span class="text-[10px] font-bold bg-slate-800 text-slate-400 px-2 py-0.5 rounded">Alternate #${idx}</span>`
+                                }
+                            </div>
+                            ${window.isAdminAuthenticated ? `<span class="text-xs font-mono text-amber-400 font-bold">Score: ${req.score.toFixed(1)}</span>` : ''}
+                        </div>
+                        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 bg-slate-900/80 p-2.5 rounded-lg border border-slate-800 text-xs text-slate-300">
+                            <div>
+                                <span class="text-[10px] text-slate-500 block uppercase">${speedupLabel} Speedups</span>
+                                <span class="font-semibold text-cyan-400">${req.specific || 0} Days</span>
+                            </div>
+                            <div>
+                                <span class="text-[10px] text-slate-500 block uppercase">General Speedups</span>
+                                <span class="font-semibold text-cyan-400">${req.general || 0} Days</span>
+                            </div>
+                            ${window.currentDay === 1 ? `
+                                <div>
+                                    <span class="text-[10px] text-slate-500 block uppercase">Fire Crystals</span>
+                                    <span class="font-semibold text-amber-400">${req.fc || 0} Units</span>
+                                </div>
+                            ` : ''}
+                        </div>
+                    `;
+                    container.appendChild(card);
+                });
+            }
+
+            document.getElementById('slotDetailModal').classList.remove('hidden');
+        };
+
+        window.closeSlotDetailModal = function() {
+            document.getElementById('slotDetailModal').classList.add('hidden');
+        };
 
         function populateModalTimeSelect() {
             const select = document.getElementById('slotSelect');
