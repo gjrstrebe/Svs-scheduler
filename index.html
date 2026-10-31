@@ -134,13 +134,14 @@
         <!-- Request / Info Banner -->
         <div class="bg-slate-900 border border-slate-800 rounded-xl p-4 mb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
             <div>
-                <h2 class="text-base font-bold text-white flex items-center gap-2">
+                <h2 class="text-base font-bold text-white flex flex-wrap items-center gap-2">
                     <span id="currentDayTitle">Day 1: City Construction</span>
                     <span class="text-xs font-normal text-slate-400 bg-slate-800 px-2 py-0.5 rounded border border-slate-700">48 Time Slots (30m each)</span>
+                    <span id="signupWindowBadge" class="text-xs font-semibold px-2 py-0.5 rounded border"></span>
                 </h2>
-                <p class="text-xs text-slate-400 mt-1">Submit your resources to request a Buff window. Conflicts are calculated automatically based on total contributions.</p>
+                <p class="text-xs text-slate-400 mt-1" id="signupWindowNotice">Submit your resources to request a Buff window. Conflicts are calculated automatically based on total contributions.</p>
             </div>
-            <button onclick="openRequestModal()" class="w-full md:w-auto px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-lg shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2 transition-all">
+            <button onclick="openRequestModal()" id="requestBuffBtn" class="w-full md:w-auto px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-lg shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2 transition-all">
                 <i class="fa-solid fa-calendar-plus"></i>
                 <span>Request Buff Slot</span>
             </button>
@@ -172,6 +173,28 @@
 
             <div class="mt-6 pt-3 border-t border-slate-800 flex justify-end">
                 <button onclick="closeSlotDetailModal()" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs rounded-lg transition-all">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bump Alert Modal -->
+    <div id="bumpAlertModal" class="fixed inset-0 bg-slate-950/85 backdrop-blur-sm z-50 flex items-center justify-center p-4 hidden">
+        <div class="bg-slate-900 border border-amber-500/40 rounded-2xl w-full max-w-md p-6 shadow-2xl relative">
+            <div class="flex items-center gap-3 text-amber-400 mb-3">
+                <i class="fa-solid fa-triangle-exclamation text-2xl"></i>
+                <h3 class="text-lg font-bold text-white">Primary Holder Displaced!</h3>
+            </div>
+            <p class="text-xs text-slate-300 leading-relaxed mb-4">
+                Your resource submission score higher than <strong class="text-amber-400" id="bumpedPlayerName">--</strong>'s submission. 
+                They have been moved to <strong>Alternate #1</strong> for this slot.
+            </p>
+            <div class="bg-amber-950/30 border border-amber-800/50 p-3 rounded-xl text-xs text-amber-200 mb-5">
+                <i class="fa-solid fa-bell mr-1"></i> Please notify <strong id="bumpedPlayerTag">--</strong> and State Admin in-game so everyone is aware of the schedule change.
+            </div>
+            <div class="flex justify-end gap-2">
+                <button onclick="confirmBumpSubmission()" class="px-5 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg transition-all">
+                    Acknowledge & Confirm Request
+                </button>
             </div>
         </div>
     </div>
@@ -355,6 +378,49 @@
         window.currentTimezone = 'UTC';
         window.isAdminAuthenticated = false;
 
+        let pendingSubmissionData = null;
+
+        // Dynamic SvS Schedule & Sign-up Window Calculations (Monday UTC Reset)
+        function getSvSTimings() {
+            const now = new Date();
+            const nowUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes());
+            const currentDayOfWeek = now.getUTCDay(); // 0: Sun, 1: Mon, ...
+            
+            // Find current week's SvS Monday Reset (00:00 UTC)
+            const daysSinceMon = (currentDayOfWeek + 6) % 7;
+            const monReset = new Date(nowUtc - (daysSinceMon * 86400000));
+            monReset.setUTCHours(0, 0, 0, 0);
+
+            const sunSignupStart = monReset.getTime() - 86400000; // Sunday 00:00 UTC
+            const sunSignupEnd = monReset.getTime() - 1;          // Sunday 23:59 UTC
+
+            const wedSignupStart = monReset.getTime() + (2 * 86400000); // Wednesday 00:00 UTC (for Day 4)
+            const wedSignupEnd = monReset.getTime() + (3 * 86400000) - 1;
+
+            const thuSignupStart = monReset.getTime() + (3 * 86400000); // Thursday 00:00 UTC (for Day 5)
+            const thuSignupEnd = monReset.getTime() + (4 * 86400000) - 1;
+
+            return {
+                nowUtc,
+                monReset: monReset.getTime(),
+                windows: {
+                    1: { start: sunSignupStart, end: sunSignupEnd, name: "Sunday" },
+                    4: { start: wedSignupStart, end: wedSignupEnd, name: "Wednesday" },
+                    5: { start: thuSignupStart, end: thuSignupEnd, name: "Thursday" }
+                }
+            };
+        }
+
+        function getInitialSmartDay() {
+            const { nowUtc, monReset } = getSvSTimings();
+            const day4Start = monReset + (3 * 86400000); // Thursday reset
+            const day5Start = monReset + (4 * 86400000); // Friday reset
+
+            if (nowUtc >= day5Start) return 5;
+            if (nowUtc >= day4Start) return 4;
+            return 1;
+        }
+
         // --- Helper & Utility Functions ---
         function updateSyncIndicator(online, customMessage) {
             const el = document.getElementById('syncStatus');
@@ -479,9 +545,37 @@
                 fcField.classList.add("hidden");
             }
 
+            updateSignupWindowUI();
             renderSlotsGrid();
             if (window.isAdminAuthenticated) renderAdminSubmissions();
         };
+
+        function updateSignupWindowUI() {
+            const { nowUtc, windows } = getSvSTimings();
+            const win = windows[window.currentDay];
+            const badge = document.getElementById("signupWindowBadge");
+            const notice = document.getElementById("signupWindowNotice");
+            const reqBtn = document.getElementById("requestBuffBtn");
+
+            const isOpen = nowUtc >= win.start && nowUtc <= win.end;
+
+            if (isOpen) {
+                badge.className = "text-xs font-bold px-2 py-0.5 rounded border bg-emerald-950/80 text-emerald-400 border-emerald-800";
+                badge.innerText = `Sign-ups OPEN (${win.name})`;
+                notice.innerText = "Sign-up window is active! Submit your resources to request a Buff window.";
+                reqBtn.classList.remove("opacity-50", "pointer-events-none");
+            } else if (nowUtc < win.start) {
+                badge.className = "text-xs font-bold px-2 py-0.5 rounded border bg-amber-950/80 text-amber-400 border-amber-800";
+                badge.innerText = `Sign-ups Open ${win.name}`;
+                notice.innerText = `Sign-ups for Day ${window.currentDay} are not open yet (Opens ${win.name} UTC). Browsing mode active.`;
+                reqBtn.classList.add("opacity-50");
+            } else {
+                badge.className = "text-xs font-bold px-2 py-0.5 rounded border bg-slate-800 text-slate-400 border-slate-700";
+                badge.innerText = "Sign-ups Closed";
+                notice.innerText = "Sign-up window for this day has closed. Schedule finalized.";
+                reqBtn.classList.add("opacity-50");
+            }
+        }
 
         window.setTimezone = function(tz) {
             window.currentTimezone = tz;
@@ -516,7 +610,12 @@
 
             for (let i = 0; i < 48; i++) {
                 const requests = scheduleData[window.currentDay][i] || [];
-                const sorted = [...requests].sort((a, b) => b.score - a.score || a.timestamp - b.timestamp);
+                // Admin locked items stay at index 0; others sorted strictly by calculated score
+                const sorted = [...requests].sort((a, b) => {
+                    if (a.isLocked && !b.isLocked) return -1;
+                    if (!a.isLocked && b.isLocked) return 1;
+                    return b.score - a.score || a.timestamp - b.timestamp;
+                });
 
                 const primary = sorted[0];
                 const alternates = sorted.slice(1);
@@ -524,7 +623,7 @@
                 const card = document.createElement('div');
                 card.className = `p-3.5 rounded-xl border flex flex-col justify-between transition-all cursor-pointer hover:border-cyan-500/60 ${
                     primary 
-                        ? 'bg-slate-900/90 border-slate-700' 
+                        ? (primary.isLocked ? 'bg-amber-950/20 border-amber-500/50' : 'bg-slate-900/90 border-slate-700') 
                         : 'bg-slate-950/40 border-slate-800/60 hover:border-slate-700'
                 }`;
                 card.setAttribute('onclick', `openSlotDetailModal(${i})`);
@@ -534,7 +633,9 @@
                         <div class="flex justify-between items-center mb-2">
                             <span class="font-mono text-xs font-bold text-cyan-400">${formatSlotTime(i)}</span>
                             ${primary 
-                                ? `<span class="text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800 px-1.5 py-0.5 rounded font-bold uppercase">Confirmed</span>` 
+                                ? (primary.isLocked 
+                                    ? `<span class="text-[10px] bg-amber-950/80 text-amber-400 border border-amber-800 px-1.5 py-0.5 rounded font-bold uppercase"><i class="fa-solid fa-lock mr-1"></i>Locked</span>` 
+                                    : `<span class="text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800 px-1.5 py-0.5 rounded font-bold uppercase">Confirmed</span>`)
                                 : `<span class="text-[10px] bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded">Available</span>`
                             }
                         </div>
@@ -547,7 +648,7 @@
                                 <span>[${primary.allianceTag}] ${primary.playerName}</span>
                                 ${window.isAdminAuthenticated ? `<span class="text-[10px] text-amber-400 font-mono">Score: ${primary.score.toFixed(1)}</span>` : ''}
                             </div>
-                            <div class="text-[11px] text-slate-400 mt-0.5">Primary Slot Holder</div>
+                            <div class="text-[11px] text-slate-400 mt-0.5">Primary Slot Holder ${primary.isLocked ? '(Admin Override)' : ''}</div>
                         </div>
                     `;
 
@@ -581,7 +682,11 @@
         // --- Slot Details Modal Logic ---
         window.openSlotDetailModal = function(slotIndex) {
             const requests = scheduleData[window.currentDay][slotIndex] || [];
-            const sorted = [...requests].sort((a, b) => b.score - a.score || a.timestamp - b.timestamp);
+            const sorted = [...requests].sort((a, b) => {
+                if (a.isLocked && !b.isLocked) return -1;
+                if (!a.isLocked && b.isLocked) return 1;
+                return b.score - a.score || a.timestamp - b.timestamp;
+            });
 
             const titles = {
                 1: "Day 1: City Construction",
@@ -606,9 +711,9 @@
                     const isPrimary = idx === 0;
                     const card = document.createElement('div');
                     card.className = `p-3.5 rounded-xl border ${
-                        isPrimary 
-                            ? 'bg-emerald-950/20 border-emerald-500/40' 
-                            : 'bg-slate-950 border-slate-800'
+                        req.isLocked 
+                            ? 'bg-amber-950/20 border-amber-500/40' 
+                            : (isPrimary ? 'bg-emerald-950/20 border-emerald-500/40' : 'bg-slate-950 border-slate-800')
                     }`;
 
                     let speedupLabel = "Construction";
@@ -619,12 +724,21 @@
                         <div class="flex justify-between items-center mb-2">
                             <div class="flex items-center gap-2">
                                 <span class="font-bold text-sm text-white">[${req.allianceTag}] ${req.playerName}</span>
-                                ${isPrimary 
-                                    ? `<span class="text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded">Primary Slot Holder</span>` 
-                                    : `<span class="text-[10px] font-bold bg-slate-800 text-slate-400 px-2 py-0.5 rounded">Alternate #${idx}</span>`
+                                ${req.isLocked 
+                                    ? `<span class="text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 px-2 py-0.5 rounded"><i class="fa-solid fa-lock mr-1"></i>Admin Locked</span>`
+                                    : (isPrimary 
+                                        ? `<span class="text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded">Primary Slot Holder</span>` 
+                                        : `<span class="text-[10px] font-bold bg-slate-800 text-slate-400 px-2 py-0.5 rounded">Alternate #${idx}</span>`)
                                 }
                             </div>
-                            ${window.isAdminAuthenticated ? `<span class="text-xs font-mono text-amber-400 font-bold">Score: ${req.score.toFixed(1)}</span>` : ''}
+                            <div class="flex items-center gap-2">
+                                ${window.isAdminAuthenticated ? `<span class="text-xs font-mono text-amber-400 font-bold mr-2">Score: ${req.score.toFixed(1)}</span>` : ''}
+                                ${window.isAdminAuthenticated ? `
+                                    <button onclick="toggleLockSubmission('${req.docId}', ${!req.isLocked})" class="px-2 py-1 text-[11px] font-bold rounded transition-all ${req.isLocked ? 'bg-amber-500 text-slate-950 hover:bg-amber-400' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}">
+                                        <i class="fa-solid ${req.isLocked ? 'fa-lock' : 'fa-lock-open'} mr-1"></i> ${req.isLocked ? 'Unlock' : 'Lock Primary'}
+                                    </button>
+                                ` : ''}
+                            </div>
                         </div>
                         <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 bg-slate-900/80 p-2.5 rounded-lg border border-slate-800 text-xs text-slate-300">
                             <div>
@@ -648,6 +762,17 @@
             }
 
             document.getElementById('slotDetailModal').classList.remove('hidden');
+        };
+
+        window.toggleLockSubmission = async function(docId, shouldLock) {
+            if (!currentUser || !docId) return;
+            try {
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', `requests_day_${window.currentDay}`, docId);
+                await setDoc(docRef, { isLocked: shouldLock }, { merge: true });
+                closeSlotDetailModal();
+            } catch (err) {
+                console.error("Error setting slot lock status:", err);
+            }
         };
 
         window.closeSlotDetailModal = function() {
@@ -695,18 +820,48 @@
                 fc,
                 score: computedScore,
                 timestamp: Date.now(),
-                userId: currentUser.uid
+                userId: currentUser.uid,
+                isLocked: false
             };
 
+            // Check if submission displaces an existing unlocked primary slot holder
+            const currentSlotRequests = scheduleData[window.currentDay][slotIndex] || [];
+            const currentSorted = [...currentSlotRequests].sort((a, b) => {
+                if (a.isLocked && !b.isLocked) return -1;
+                if (!a.isLocked && b.isLocked) return 1;
+                return b.score - a.score || a.timestamp - b.timestamp;
+            });
+
+            const currentPrimary = currentSorted[0];
+
+            if (currentPrimary && !currentPrimary.isLocked && computedScore > currentPrimary.score) {
+                pendingSubmissionData = newRequest;
+                document.getElementById('bumpedPlayerName').innerText = `[${currentPrimary.allianceTag}] ${currentPrimary.playerName}`;
+                document.getElementById('bumpedPlayerTag').innerText = `[${currentPrimary.allianceTag}] ${currentPrimary.playerName}`;
+                document.getElementById('bumpAlertModal').classList.remove('hidden');
+            } else {
+                await saveSubmissionToFirestore(newRequest);
+            }
+        };
+
+        window.confirmBumpSubmission = async function() {
+            if (pendingSubmissionData) {
+                await saveSubmissionToFirestore(pendingSubmissionData);
+                pendingSubmissionData = null;
+            }
+            document.getElementById('bumpAlertModal').classList.add('hidden');
+        };
+
+        async function saveSubmissionToFirestore(requestObject) {
             try {
                 const colRef = collection(db, 'artifacts', appId, 'public', 'data', `requests_day_${window.currentDay}`);
-                await addDoc(colRef, newRequest);
+                await addDoc(colRef, requestObject);
                 closeRequestModal();
                 document.getElementById('slotForm').reset();
             } catch (err) {
                 console.error("Error saving request to Firestore:", err);
             }
-        };
+        }
 
         // --- Admin Portal Logic ---
         window.toggleAdminModal = function() {
@@ -798,8 +953,9 @@
         };
 
         // Initialize Firebase Auth & Component UI
+        window.currentDay = getInitialSmartDay();
         initAuth();
-        renderSlotsGrid();
+        window.switchDay(window.currentDay);
         populateModalTimeSelect();
     </script>
 </body>
