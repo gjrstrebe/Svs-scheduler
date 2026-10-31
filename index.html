@@ -393,32 +393,54 @@
             5: Array.from({ length: 48 }, () => [])
         };
 
-        // Date & SvS Schedule Helper Functions
+        // Date & SvS Schedule Helper Functions (28-Day Cycle Engine)
         function getSvSTimings() {
             const now = new Date();
-            const utcDay = now.getUTCDay(); // 0 = Sun, 1 = Mon, ..., 6 = Sat
-            const utcHours = now.getUTCHours();
+            
+            // Anchor Monday for an SvS Prep Week (00:00 UTC)
+            // SvS occurs every 4 weeks (28 days)
+            const ANCHOR_SVS_MONDAY = new Date(Date.UTC(2026, 10, 2, 0, 0, 0)); // Mon Nov 2 2026 00:00 UTC
+            const MS_PER_DAY = 24 * 60 * 60 * 1000;
+            const MS_PER_CYCLE = 28 * MS_PER_DAY;
 
-            // Calculate current Monday UTC reset point
-            let daysToMonday = (utcDay === 0 ? -6 : 1 - utcDay);
-            const mondayReset = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysToMonday, 0, 0, 0));
+            // Calculate current cycle position
+            let timeDiff = now.getTime() - ANCHOR_SVS_MONDAY.getTime();
+            let cycleOffset = timeDiff % MS_PER_CYCLE;
+            if (cycleOffset < 0) cycleOffset += MS_PER_CYCLE;
 
-            const sundaySignupStart = new Date(mondayReset.getTime() - (24 * 60 * 60 * 1000));
-            const sundaySignupEnd = new Date(mondayReset.getTime() - 1);
+            // Current Monday of the active 28-day cycle
+            const currentCycleSvSMonday = new Date(now.getTime() - cycleOffset);
+            
+            // If we are in off-weeks (week 2, 3, 4 of cycle), calculate next upcoming SvS Monday
+            let targetSvSMonday = new Date(currentCycleSvSMonday.getTime());
+            if (cycleOffset >= 7 * MS_PER_DAY) {
+                targetSvSMonday = new Date(currentCycleSvSMonday.getTime() + MS_PER_CYCLE);
+            }
 
-            const wednesdaySignupStart = new Date(mondayReset.getTime() + (2 * 24 * 60 * 60 * 1000));
-            const wednesdaySignupEnd = new Date(mondayReset.getTime() + (3 * 24 * 60 * 60 * 1000) - 1);
+            // Window definitions relative to target SvS Monday
+            // Day 1 (City Construction): Sign up on Sunday before SvS Reset
+            const day1Start = new Date(targetSvSMonday.getTime() - (1 * MS_PER_DAY));
+            const day1End = new Date(targetSvSMonday.getTime() - 1);
 
-            const thursdaySignupStart = new Date(mondayReset.getTime() + (3 * 24 * 60 * 60 * 1000));
-            const thursdaySignupEnd = new Date(mondayReset.getTime() + (4 * 24 * 60 * 60 * 1000) - 1);
+            // Day 4 (Troop Training): Sign up on Wednesday
+            const day4Start = new Date(targetSvSMonday.getTime() + (2 * MS_PER_DAY));
+            const day4End = new Date(targetSvSMonday.getTime() + (3 * MS_PER_DAY) - 1);
+
+            // Day 5 (Research): Sign up on Thursday
+            const day5Start = new Date(targetSvSMonday.getTime() + (3 * MS_PER_DAY));
+            const day5End = new Date(targetSvSMonday.getTime() + (4 * MS_PER_DAY) - 1);
+
+            const isDay1Open = now >= day1Start && now <= day1End;
+            const isDay4Open = now >= day4Start && now <= day4End;
+            const isDay5Open = now >= day5Start && now <= day5End;
 
             return {
                 now,
-                mondayReset,
+                targetSvSMonday,
                 signupWindows: {
-                    1: { start: sundaySignupStart, end: sundaySignupEnd, isOpen: now >= sundaySignupStart && now <= sundaySignupEnd },
-                    4: { start: wednesdaySignupStart, end: wednesdaySignupEnd, isOpen: now >= wednesdaySignupStart && now <= wednesdaySignupEnd },
-                    5: { start: thursdaySignupStart, end: thursdaySignupEnd, isOpen: now >= thursdaySignupStart && now <= thursdaySignupEnd }
+                    1: { start: day1Start, end: day1End, isOpen: isDay1Open, isPast: now > day1End },
+                    4: { start: day4Start, end: day4End, isOpen: isDay4Open, isPast: now > day4End },
+                    5: { start: day5Start, end: day5End, isOpen: isDay5Open, isPast: now > day5End }
                 }
             };
         }
@@ -432,12 +454,13 @@
 
         function formatTimestampToDisplay(dateObj) {
             if (window.displayTimezone === 'LOCAL') {
-                return dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', weekday: 'short' });
+                return dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', weekday: 'short', month: 'short', day: 'numeric' });
             }
             const hours = String(dateObj.getUTCHours()).padStart(2, '0');
             const minutes = String(dateObj.getUTCMinutes()).padStart(2, '0');
             const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-            return `${days[dateObj.getUTCDay()]} ${hours}:${minutes} UTC`;
+            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            return `${days[dateObj.getUTCDay()]} ${months[dateObj.getUTCMonth()]} ${dateObj.getUTCDate()} @ ${hours}:${minutes} UTC`;
         }
 
         function formatSlotTime(slotIndex) {
@@ -504,10 +527,21 @@
                 notice.innerText = `Sign-ups active for Day ${window.currentDay}. Submit contributions to request your window.`;
                 btn.disabled = false;
                 btn.classList.remove('opacity-50', 'cursor-not-allowed');
-            } else {
+            } else if (win.isPast && window.signupWindowOverride === null) {
                 badge.className = "text-xs font-semibold px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/60 text-rose-400";
-                badge.innerText = `Sign-Ups CLOSED (${startFormatted} – ${endFormatted})`;
-                notice.innerText = `Sign-up window is closed for Day ${window.currentDay}. Browsing view enabled.`;
+                badge.innerText = `Sign-Up Window Ended (${startFormatted})`;
+                notice.innerText = `Sign-up window has concluded for this event. Next window opens ahead of the next SvS cycle.`;
+                if (!window.isAdminAuthenticated) {
+                    btn.disabled = true;
+                    btn.classList.add('opacity-50', 'cursor-not-allowed');
+                } else {
+                    btn.disabled = false;
+                    btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                }
+            } else {
+                badge.className = "text-xs font-semibold px-2 py-0.5 rounded border border-amber-500/40 bg-amber-950/60 text-amber-400";
+                badge.innerText = `Sign-Ups Open: ${startFormatted}`;
+                notice.innerText = `Sign-ups for Day ${window.currentDay} are not open yet. Next window starts on ${startFormatted}.`;
                 if (!window.isAdminAuthenticated) {
                     btn.disabled = true;
                     btn.classList.add('opacity-50', 'cursor-not-allowed');
