@@ -289,100 +289,208 @@
             <div id="adminAuthSection">
                 <h3 class="text-lg font-bold text-white mb-2">President / Admin Portal</h3>
                 <p class="text-xs text-slate-400 mb-4">Enter passkey to view raw scoring, manual slot overrides, and data backup tools.</p>
-                <div class="flex gap-2">
+                <form onsubmit="event.preventDefault(); verifyAdmin();" class="flex gap-2">
                     <input type="password" id="adminPasskey" value="" placeholder="Enter Admin Password" class="bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-white flex-grow focus:outline-none focus:border-amber-500">
-                    <button onclick="verifyAdmin()" class="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg">Login</button>
-                </div>
+                    <button type="submit" class="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-lg">Login</button>
+                </form>
             </div>
 
             <div id="adminDashboardSection" class="hidden space-y-6">
-                <div class="flex justify-between items-center border-b border-slate-800 pb-3">
-                    <h3 class="text-lg font-bold text-amber-400 flex items-center gap-2">
-                        <i class="fa-solid fa-user-shield"></i> Admin Dashboard Active
-                    </h3>
-                    <button onclick="logoutAdmin()" class="text-xs text-slate-400 hover:text-red-400">Logout</button>
-                </div>
-
-                <!-- Backup & Restore Actions -->
-                <div class="p-4 bg-slate-950 rounded-xl border border-slate-800">
-                    <h4 class="text-xs font-bold text-white uppercase tracking-wider mb-2">Data Operations</h4>
-                    <div class="flex flex-wrap gap-2">
-                        <button onclick="exportDataJSON()" class="px-3 py-1.5 bg-slate-800 border border-slate-700 hover:border-slate-600 text-xs font-semibold rounded flex items-center gap-1.5 text-slate-300">
-                            <i class="fa-solid fa-download"></i> Export Schedule Backup (JSON)
-                        </button>
-                        <button onclick="clearAllData()" class="px-3 py-1.5 bg-red-950/40 border border-red-800/40 hover:bg-red-900/40 text-xs font-semibold rounded flex items-center gap-1.5 text-red-400">
-                            <i class="fa-solid fa-trash-can"></i> Clear Current Day
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Admin Score Breakdown View -->
-                <div>
-                    <h4 class="text-xs font-bold text-white uppercase tracking-wider mb-2">Raw Submissions & Conflict Scores</h4>
-                    <div id="adminSubmissionsList" class="space-y-2 max-h-60 overflow-y-auto">
-                        <!-- Populated via JS -->
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- ========================================== -->
-    <!-- SECTION: Firebase v11 CDN & Application JS  -->
-    <!-- ========================================== -->
     <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { 
-            getAuth, 
-            signInAnonymously, 
-            signInWithCustomToken, 
-            onAuthStateChanged 
-        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { 
-            getFirestore, 
-            collection, 
-            doc, 
-            setDoc, 
-            addDoc, 
-            updateDoc,
-            deleteDoc, 
-            onSnapshot 
-        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.3.0/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.3.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, deleteDoc, doc, updateDoc } from "https://www.gstatic.com/firebasejs/11.3.0/firebase-firestore.js";
 
-        // Global Variables with live fallback to your wos-svs-ace Firebase config
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'wos-svs-4336';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' 
-            ? JSON.parse(__firebase_config) 
-            : {
-                apiKey: "AIzaSyDoIWVit2rm4ulwIz9qy6HttWGfGFrA7Fg",
-                authDomain: "wos-svs-ace.firebaseapp.com",
-                projectId: "wos-svs-ace",
-                storageBucket: "wos-svs-ace.firebasestorage.app",
-                messagingSenderId: "461982834244",
-                appId: "1:461982834244:web:7e01bc85a94c5303086611"
-            };
+        const firebaseConfig = {
+            apiKey: "AIzaSyDoIWVit2rm4ulwIz9qy6HttWGfGFrA7Fg",
+            authDomain: "wos-svs-ace.firebaseapp.com",
+            projectId: "wos-svs-ace",
+            storageBucket: "wos-svs-ace.firebasestorage.app",
+            messagingSenderId: "461982834244",
+            appId: "1:461982834244:web:7e01bc85a94c5303086611"
+        };
 
-        // Initialize Firebase SDK
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
+        const appId = 'wos_svs_4336';
 
-        let currentUser = null;
-        let scheduleData = {
-            1: Array.from({ length: 48 }, () => []),
-            4: Array.from({ length: 48 }, () => []),
-            5: Array.from({ length: 48 }, () => [])
-        };
-
-        // Fallback local memory store if Firestore rules block remote sync
-        let localFallbackMode = false;
-
-        // State Flags
+        // Global Application State
         window.currentDay = 1;
         window.currentTimezone = 'UTC';
         window.isAdminAuthenticated = false;
 
+        let currentUser = null;
+        let scheduleData = { 1: {}, 4: {}, 5: {} };
         let pendingSubmissionData = null;
+        let localFallbackMode = false;
+        let windowOverrideMode = null; // null = use real time, true = force open, false = force closed
+
+        // Global Modal & Admin Handlers attached explicitly to window object
+        window.toggleAdminModal = function() {
+            const modal = document.getElementById('adminModal');
+            if (modal) {
+                modal.classList.toggle('hidden');
+            }
+        };
+
+        window.verifyAdmin = function() {
+            const passInput = document.getElementById('adminPasskey');
+            const pass = passInput ? passInput.value.trim() : '';
+
+            if (pass === 'WOS4336') {
+                window.isAdminAuthenticated = true;
+                const authSec = document.getElementById('adminAuthSection');
+                const dashSec = document.getElementById('adminDashboardSection');
+                const btnText = document.getElementById('adminBtnText');
+
+                if (authSec) authSec.classList.add('hidden');
+                if (dashSec) dashSec.classList.remove('hidden');
+                if (btnText) btnText.innerText = 'Admin Active';
+
+                updateSignupWindowUI();
+                renderAdminSubmissions();
+                renderSlotsGrid();
+            } else {
+                alert('Invalid Admin Passkey. Please try again.');
+            }
+        };
+
+        window.logoutAdmin = function() {
+            window.isAdminAuthenticated = false;
+            const authSec = document.getElementById('adminAuthSection');
+            const dashSec = document.getElementById('adminDashboardSection');
+            const btnText = document.getElementById('adminBtnText');
+            const passInput = document.getElementById('adminPasskey');
+
+            if (authSec) authSec.classList.remove('hidden');
+            if (dashSec) dashSec.classList.add('hidden');
+            if (btnText) btnText.innerText = 'Admin Portal';
+            if (passInput) passInput.value = '';
+
+            updateSignupWindowUI();
+            renderSlotsGrid();
+        };
+
+        window.setWindowOverride = function(mode) {
+            windowOverrideMode = mode;
+            updateSignupWindowUI();
+        };
+
+        // Calculate score based on Day math
+        function calculateScore(day, specific, general, fc) {
+            const specDays = parseFloat(specific) || 0;
+            const genDays = parseFloat(general) || 0;
+            const totalSpeedups = specDays + genDays;
+
+            if (day === 1) {
+                const fcCount = parseFloat(fc) || 0;
+                const fcComponent = (Math.log(fcCount + 1) * 120) + (fcCount * 0.15);
+                return (totalSpeedups * 10) + fcComponent;
+            }
+            return totalSpeedups * 10;
+        }
+
+        window.openRequestModal = function() {
+            const { nowUtc, windows } = getSvSTimings();
+            const windowInfo = windows[window.currentDay];
+            const isOpen = windowOverrideMode !== null ? windowOverrideMode : (windowInfo && nowUtc >= windowInfo.start && nowUtc <= windowInfo.end);
+
+            if (!isOpen && !window.isAdminAuthenticated) {
+                alert(`Sign-up window for Day ${window.currentDay} is currently closed.`);
+                return;
+            }
+
+            const modal = document.getElementById('requestModal');
+            if (modal) modal.classList.remove('hidden');
+        };
+
+        window.closeRequestModal = function() {
+            const modal = document.getElementById('requestModal');
+            if (modal) modal.classList.add('hidden');
+        };
+
+        window.handleRequestSubmit = async function(event) {
+            if (event) event.preventDefault();
+
+            const playerName = document.getElementById('playerName').value.trim();
+            const allianceTag = document.getElementById('allianceTag').value.trim();
+            const slotIndex = parseInt(document.getElementById('slotSelect').value, 10);
+            const specific = parseFloat(document.getElementById('specificSpeedups').value) || 0;
+            const general = parseFloat(document.getElementById('generalSpeedups').value) || 0;
+            const fc = parseFloat(document.getElementById('fireCrystals').value) || 0;
+
+            if (!playerName || !allianceTag) return;
+
+            const score = calculateScore(window.currentDay, specific, general, fc);
+
+            const payload = {
+                playerName,
+                allianceTag,
+                slotIndex,
+                specific,
+                general,
+                fc,
+                score,
+                timestamp: Date.now(),
+                isLocked: false
+            };
+
+            const existingSlotRequests = scheduleData[window.currentDay][slotIndex] || [];
+            const sortedExisting = [...existingSlotRequests].sort((a, b) => {
+                if (a.isLocked && !b.isLocked) return -1;
+                if (!a.isLocked && b.isLocked) return 1;
+                return b.score - a.score || a.timestamp - b.timestamp;
+            });
+
+            const currentPrimary = sortedExisting[0];
+
+            if (currentPrimary && !currentPrimary.isLocked && score > currentPrimary.score && currentPrimary.playerName !== playerName) {
+                pendingSubmissionData = payload;
+                document.getElementById('bumpedPlayerName').innerText = `[${currentPrimary.allianceTag}] ${currentPrimary.playerName}`;
+                document.getElementById('bumpedPlayerTag').innerText = `[${currentPrimary.allianceTag}] ${currentPrimary.playerName}`;
+                window.closeRequestModal();
+                const bumpModal = document.getElementById('bumpAlertModal');
+                if (bumpModal) bumpModal.classList.remove('hidden');
+                return;
+            }
+
+            await executeSubmissionSave(payload);
+        };
+
+        window.confirmBumpSubmission = async function() {
+            if (pendingSubmissionData) {
+                await executeSubmissionSave(pendingSubmissionData);
+                pendingSubmissionData = null;
+            }
+            const bumpModal = document.getElementById('bumpAlertModal');
+            if (bumpModal) bumpModal.classList.add('hidden');
+        };
+
+        async function executeSubmissionSave(payload) {
+            if (localFallbackMode) {
+                const dayRequests = scheduleData[window.currentDay][payload.slotIndex] || [];
+                dayRequests.push({ docId: `local_${Date.now()}`, ...payload });
+                scheduleData[window.currentDay][payload.slotIndex] = dayRequests;
+                try {
+                    localStorage.setItem(`wos_day_${window.currentDay}`, JSON.stringify(scheduleData[window.currentDay]));
+                } catch (e) {
+                    console.error("Failed writing to localStorage", e);
+                }
+                renderSlotsGrid();
+                window.closeRequestModal();
+                return;
+            }
+
+            try {
+                const colRef = collection(db, 'artifacts', appId, 'public', 'data', `requests_day_${window.currentDay}`);
+                await addDoc(colRef, payload);
+                window.closeRequestModal();
+            } catch (err) {
+                console.error("Firestore submit error:", err);
+                alert("Submission failed. Switched to offline state.");
+            }
+        }
 
         // Dynamic SvS Schedule & Sign-up Window Calculations (Monday UTC Reset)
         function getSvSTimings() {
@@ -496,7 +604,7 @@
 
             if (!windowInfo) return;
 
-            const isOpen = nowUtc >= windowInfo.start && nowUtc <= windowInfo.end;
+            const isOpen = windowOverrideMode !== null ? windowOverrideMode : (nowUtc >= windowInfo.start && nowUtc <= windowInfo.end);
             const startStr = formatTimestampToDisplay(windowInfo.start);
             const endStr = formatTimestampToDisplay(windowInfo.end);
             const rangeText = `${startStr} – ${endStr}`;
