@@ -73,7 +73,7 @@
 
             <div class="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end">
                 <!-- Sync Status Indicator -->
-                <div id="syncStatus" class="flex items-center gap-1.5 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg">
+                <div id="syncStatus" onclick="alert('Firebase Security Rules Note:\n\nTo enable live syncing across players, update your Firestore Security Rules in Firebase Console (wos-svs-ace) to allow read/write access to:\n/artifacts/{appId}/public/{document=**}')" class="flex items-center gap-1.5 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg cursor-pointer">
                     <i class="fa-solid fa-circle-notch fa-spin"></i>
                     <span>Connecting...</span>
                 </div>
@@ -344,6 +344,7 @@
             doc, 
             setDoc, 
             addDoc, 
+            updateDoc,
             deleteDoc, 
             onSnapshot 
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
@@ -373,6 +374,9 @@
             5: Array.from({ length: 48 }, () => [])
         };
 
+        // Fallback local memory store if Firestore rules block remote sync
+        let localFallbackMode = false;
+
         // State Flags
         window.currentDay = 1;
         window.currentTimezone = 'UTC';
@@ -383,26 +387,35 @@
         // Dynamic SvS Schedule & Sign-up Window Calculations (Monday UTC Reset)
         function getSvSTimings() {
             const now = new Date();
-            const nowUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), now.getUTCHours(), now.getUTCMinutes());
-            const currentDayOfWeek = now.getUTCDay(); // 0: Sun, 1: Mon, ...
+            const nowUtc = now.getTime();
             
-            // Find current week's SvS Monday Reset (00:00 UTC)
-            const daysSinceMon = (currentDayOfWeek + 6) % 7;
-            const monReset = new Date(nowUtc - (daysSinceMon * 86400000));
-            monReset.setUTCHours(0, 0, 0, 0);
+            const currentDayOfWeek = now.getUTCDay();
+            
+            let daysToMon = 0;
+            if (currentDayOfWeek === 0) {
+                daysToMon = 1;
+            } else if (currentDayOfWeek === 6) {
+                daysToMon = 2;
+            } else {
+                daysToMon = -(currentDayOfWeek - 1);
+            }
 
-            const sunSignupStart = monReset.getTime() - 86400000; // Sunday 00:00 UTC
-            const sunSignupEnd = monReset.getTime() - 1;          // Sunday 23:59 UTC
+            const monResetDate = new Date(nowUtc + (daysToMon * 86400000));
+            monResetDate.setUTCHours(0, 0, 0, 0);
+            const monReset = monResetDate.getTime();
 
-            const wedSignupStart = monReset.getTime() + (2 * 86400000); // Wednesday 00:00 UTC (for Day 4)
-            const wedSignupEnd = monReset.getTime() + (3 * 86400000) - 1;
+            const sunSignupStart = monReset - 86400000;
+            const sunSignupEnd = monReset - 1;
 
-            const thuSignupStart = monReset.getTime() + (3 * 86400000); // Thursday 00:00 UTC (for Day 5)
-            const thuSignupEnd = monReset.getTime() + (4 * 86400000) - 1;
+            const wedSignupStart = monReset + (2 * 86400000);
+            const wedSignupEnd = monReset + (3 * 86400000) - 1;
+
+            const thuSignupStart = monReset + (3 * 86400000);
+            const thuSignupEnd = monReset + (4 * 86400000) - 1;
 
             return {
                 nowUtc,
-                monReset: monReset.getTime(),
+                monReset,
                 windows: {
                     1: { start: sunSignupStart, end: sunSignupEnd, name: "Sunday" },
                     4: { start: wedSignupStart, end: wedSignupEnd, name: "Wednesday" },
@@ -413,167 +426,43 @@
 
         function getInitialSmartDay() {
             const { nowUtc, monReset } = getSvSTimings();
-            const day4Start = monReset + (3 * 86400000); // Thursday reset
-            const day5Start = monReset + (4 * 86400000); // Friday reset
+            const day4Start = monReset + (3 * 86400000);
+            const day5Start = monReset + (4 * 86400000);
 
             if (nowUtc >= day5Start) return 5;
             if (nowUtc >= day4Start) return 4;
             return 1;
         }
 
-        // --- Helper & Utility Functions ---
-        function updateSyncIndicator(online, customMessage) {
-            const el = document.getElementById('syncStatus');
-            if (!el) return;
-            if (online) {
-                el.className = "flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-lg";
-                el.innerHTML = `<i class="fa-solid fa-cloud-check"></i><span>Synced Live</span>`;
-            } else {
-                const msg = customMessage || "Connecting...";
-                el.className = "flex items-center gap-1.5 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg";
-                el.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i><span>${msg}</span>`;
-            }
-        }
-
+        // --- Time Formatting & Timezone Logic ---
         function formatSlotTime(slotIndex) {
             const totalMinutes = slotIndex * 30;
             const hours = Math.floor(totalMinutes / 60);
             const minutes = totalMinutes % 60;
-            const utcTimeStr = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')} UTC`;
+            const hh = String(hours).padStart(2, '0');
+            const mm = String(minutes).padStart(2, '0');
 
             if (window.currentTimezone === 'UTC') {
-                return utcTimeStr;
-            } else {
-                const now = new Date();
-                const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes));
-                return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                return `${hh}:${mm} UTC`;
             }
+
+            // Local Time Conversion
+            const now = new Date();
+            const utcDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hours, minutes));
+            return utcDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         }
 
-        // --- Authenticate User ---
-        async function initAuth() {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-            } catch (err) {
-                console.warn("Firebase Auth fallback to anonymous mode:", err);
-                try {
-                    await signInAnonymously(auth);
-                } catch (e) {
-                    console.error("Auth failed:", e);
-                }
-            }
-        }
-
-        onAuthStateChanged(auth, (user) => {
-            currentUser = user;
-            if (user) {
-                updateSyncIndicator(true);
-                setupRealtimeListeners();
+        function formatTimestampToDisplay(timestampMs) {
+            const date = new Date(timestampMs);
+            if (window.currentTimezone === 'UTC') {
+                const dayName = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getUTCDay()];
+                const hh = String(date.getUTCHours()).padStart(2, '0');
+                const mm = String(date.getUTCMinutes()).padStart(2, '0');
+                return `${dayName} ${hh}:${mm} UTC`;
             } else {
-                updateSyncIndicator(false);
-            }
-        });
-
-        // --- Firestore Real-time Sync ---
-        function setupRealtimeListeners() {
-            if (!currentUser) return;
-
-            [1, 4, 5].forEach(dayNum => {
-                // Rule 1: Strict collection path for public shared data
-                const colRef = collection(db, 'artifacts', appId, 'public', 'data', `requests_day_${dayNum}`);
-                
-                // Rule 2: Rule compliant query (no complex orderBys in firestore, sort in JS)
-                onSnapshot(colRef, (snapshot) => {
-                    const daySlots = Array.from({ length: 48 }, () => []);
-                    snapshot.docs.forEach(docSnap => {
-                        const data = docSnap.data();
-                        const slot = data.slotIndex;
-                        if (slot >= 0 && slot < 48) {
-                            daySlots[slot].push({
-                                docId: docSnap.id,
-                                ...data
-                            });
-                        }
-                    });
-                    scheduleData[dayNum] = daySlots;
-                    if (window.currentDay === dayNum) {
-                        renderSlotsGrid();
-                        if (window.isAdminAuthenticated) renderAdminSubmissions();
-                    }
-                }, (error) => {
-                    console.warn(`Firestore permission error for Day ${dayNum}. Using local storage fallback:`, error.message);
-                    updateSyncIndicator(false, "Permission Error - Update Firestore Rules");
-                });
-            });
-        }
-
-        // --- Core Application Functions exposed to Window ---
-        window.switchDay = function(day) {
-            window.currentDay = day;
-            
-            [1, 4, 5].forEach(d => {
-                const tab = document.getElementById(`dayTab${d}`);
-                if (d === day) {
-                    tab.className = "p-3 sm:p-4 rounded-xl border transition-all text-left flex flex-col justify-between bg-slate-800/90 border-cyan-500 glow-ice";
-                } else {
-                    tab.className = "p-3 sm:p-4 rounded-xl border transition-all text-left flex flex-col justify-between bg-slate-900 border-slate-800 hover:border-slate-700";
-                }
-            });
-
-            const titles = {
-                1: "Day 1: City Construction",
-                4: "Day 4: Troop Training",
-                5: "Day 5: Research"
-            };
-            document.getElementById("currentDayTitle").innerText = titles[day];
-            document.getElementById("modalDaySubtitle").innerText = titles[day];
-
-            const specificLabel = document.getElementById("specificSpeedupLabel");
-            const fcField = document.getElementById("fireCrystalField");
-            if (day === 1) {
-                specificLabel.innerText = "Construction Speedups (Days)";
-                fcField.classList.remove("hidden");
-            } else if (day === 4) {
-                specificLabel.innerText = "Troop Training Speedups (Days)";
-                fcField.classList.add("hidden");
-            } else if (day === 5) {
-                specificLabel.innerText = "Research Speedups (Days)";
-                fcField.classList.add("hidden");
-            }
-
-            updateSignupWindowUI();
-            renderSlotsGrid();
-            if (window.isAdminAuthenticated) renderAdminSubmissions();
-        };
-
-        function updateSignupWindowUI() {
-            const { nowUtc, windows } = getSvSTimings();
-            const win = windows[window.currentDay];
-            const badge = document.getElementById("signupWindowBadge");
-            const notice = document.getElementById("signupWindowNotice");
-            const reqBtn = document.getElementById("requestBuffBtn");
-
-            const isOpen = nowUtc >= win.start && nowUtc <= win.end;
-
-            if (isOpen) {
-                badge.className = "text-xs font-bold px-2 py-0.5 rounded border bg-emerald-950/80 text-emerald-400 border-emerald-800";
-                badge.innerText = `Sign-ups OPEN (${win.name})`;
-                notice.innerText = "Sign-up window is active! Submit your resources to request a Buff window.";
-                reqBtn.classList.remove("opacity-50", "pointer-events-none");
-            } else if (nowUtc < win.start) {
-                badge.className = "text-xs font-bold px-2 py-0.5 rounded border bg-amber-950/80 text-amber-400 border-amber-800";
-                badge.innerText = `Sign-ups Open ${win.name}`;
-                notice.innerText = `Sign-ups for Day ${window.currentDay} are not open yet (Opens ${win.name} UTC). Browsing mode active.`;
-                reqBtn.classList.add("opacity-50");
-            } else {
-                badge.className = "text-xs font-bold px-2 py-0.5 rounded border bg-slate-800 text-slate-400 border-slate-700";
-                badge.innerText = "Sign-ups Closed";
-                notice.innerText = "Sign-up window for this day has closed. Schedule finalized.";
-                reqBtn.classList.add("opacity-50");
+                const dayName = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getDay()];
+                const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                return `${dayName} ${timeStr}`;
             }
         }
 
@@ -589,307 +478,77 @@
                 localBtn.className = "px-3 py-1 text-xs rounded-md font-semibold transition-all bg-cyan-600 text-white";
                 utcBtn.className = "px-3 py-1 text-xs rounded-md font-semibold transition-all text-slate-400 hover:text-white";
             }
-            renderSlotsGrid();
+
+            updateSignupWindowUI();
             populateModalTimeSelect();
-        };
-
-        function calculateScore(day, specific, general, fc) {
-            const totalSpeedups = parseFloat(specific || 0) + parseFloat(general || 0);
-            if (day === 1) {
-                const crystals = parseFloat(fc || 0);
-                const fcComponent = (Math.log(crystals + 1) * 120) + (crystals * 0.15);
-                return (totalSpeedups * 10) + fcComponent;
-            } else {
-                return totalSpeedups * 10;
-            }
-        }
-
-        function renderSlotsGrid() {
-            const grid = document.getElementById('slotsGrid');
-            grid.innerHTML = '';
-
-            for (let i = 0; i < 48; i++) {
-                const requests = scheduleData[window.currentDay][i] || [];
-                // Admin locked items stay at index 0; others sorted strictly by calculated score
-                const sorted = [...requests].sort((a, b) => {
-                    if (a.isLocked && !b.isLocked) return -1;
-                    if (!a.isLocked && b.isLocked) return 1;
-                    return b.score - a.score || a.timestamp - b.timestamp;
-                });
-
-                const primary = sorted[0];
-                const alternates = sorted.slice(1);
-
-                const card = document.createElement('div');
-                card.className = `p-3.5 rounded-xl border flex flex-col justify-between transition-all cursor-pointer hover:border-cyan-500/60 ${
-                    primary 
-                        ? (primary.isLocked ? 'bg-amber-950/20 border-amber-500/50' : 'bg-slate-900/90 border-slate-700') 
-                        : 'bg-slate-950/40 border-slate-800/60 hover:border-slate-700'
-                }`;
-                card.setAttribute('onclick', `openSlotDetailModal(${i})`);
-
-                let cardContent = `
-                    <div>
-                        <div class="flex justify-between items-center mb-2">
-                            <span class="font-mono text-xs font-bold text-cyan-400">${formatSlotTime(i)}</span>
-                            ${primary 
-                                ? (primary.isLocked 
-                                    ? `<span class="text-[10px] bg-amber-950/80 text-amber-400 border border-amber-800 px-1.5 py-0.5 rounded font-bold uppercase"><i class="fa-solid fa-lock mr-1"></i>Locked</span>` 
-                                    : `<span class="text-[10px] bg-emerald-950/80 text-emerald-400 border border-emerald-800 px-1.5 py-0.5 rounded font-bold uppercase">Confirmed</span>`)
-                                : `<span class="text-[10px] bg-slate-800 text-slate-500 px-1.5 py-0.5 rounded">Available</span>`
-                            }
-                        </div>
-                `;
-
-                if (primary) {
-                    cardContent += `
-                        <div class="p-2.5 bg-slate-950 rounded-lg border border-slate-800 mb-2">
-                            <div class="text-xs font-bold text-white flex items-center justify-between">
-                                <span>[${primary.allianceTag}] ${primary.playerName}</span>
-                                ${window.isAdminAuthenticated ? `<span class="text-[10px] text-amber-400 font-mono">Score: ${primary.score.toFixed(1)}</span>` : ''}
-                            </div>
-                            <div class="text-[11px] text-slate-400 mt-0.5">Primary Slot Holder ${primary.isLocked ? '(Admin Override)' : ''}</div>
-                        </div>
-                    `;
-
-                    if (alternates.length > 0) {
-                        cardContent += `
-                            <div class="space-y-1">
-                                <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Standby Queue (${alternates.length})</div>
-                                ${alternates.map((alt, idx) => `
-                                    <div class="text-xs text-slate-400 flex justify-between items-center bg-slate-900/50 px-2 py-1 rounded">
-                                        <span>${idx + 1}. [${alt.allianceTag}] ${alt.playerName}</span>
-                                        ${window.isAdminAuthenticated ? `<span class="text-[10px] text-amber-500/70 font-mono">${alt.score.toFixed(1)}</span>` : ''}
-                                    </div>
-                                `).join('')}
-                            </div>
-                        `;
-                    }
-                } else {
-                    cardContent += `
-                        <div class="py-3 text-center text-xs text-slate-600 border border-dashed border-slate-800 rounded-lg">
-                            No requests submitted
-                        </div>
-                    `;
-                }
-
-                cardContent += `</div>`;
-                card.innerHTML = cardContent;
-                grid.appendChild(card);
-            }
-        }
-
-        // --- Slot Details Modal Logic ---
-        window.openSlotDetailModal = function(slotIndex) {
-            const requests = scheduleData[window.currentDay][slotIndex] || [];
-            const sorted = [...requests].sort((a, b) => {
-                if (a.isLocked && !b.isLocked) return -1;
-                if (!a.isLocked && b.isLocked) return 1;
-                return b.score - a.score || a.timestamp - b.timestamp;
-            });
-
-            const titles = {
-                1: "Day 1: City Construction",
-                4: "Day 4: Troop Training",
-                5: "Day 5: Research"
-            };
-
-            document.getElementById('detailModalTime').innerText = formatSlotTime(slotIndex);
-            document.getElementById('detailModalDay').innerText = titles[window.currentDay];
-
-            const container = document.getElementById('detailEntriesContainer');
-            container.innerHTML = '';
-
-            if (sorted.length === 0) {
-                container.innerHTML = `
-                    <div class="p-6 text-center text-slate-500 text-xs border border-dashed border-slate-800 rounded-xl">
-                        No players have requested this time slot yet.
-                    </div>
-                `;
-            } else {
-                sorted.forEach((req, idx) => {
-                    const isPrimary = idx === 0;
-                    const card = document.createElement('div');
-                    card.className = `p-3.5 rounded-xl border ${
-                        req.isLocked 
-                            ? 'bg-amber-950/20 border-amber-500/40' 
-                            : (isPrimary ? 'bg-emerald-950/20 border-emerald-500/40' : 'bg-slate-950 border-slate-800')
-                    }`;
-
-                    let speedupLabel = "Construction";
-                    if (window.currentDay === 4) speedupLabel = "Training";
-                    if (window.currentDay === 5) speedupLabel = "Research";
-
-                    card.innerHTML = `
-                        <div class="flex justify-between items-center mb-2">
-                            <div class="flex items-center gap-2">
-                                <span class="font-bold text-sm text-white">[${req.allianceTag}] ${req.playerName}</span>
-                                ${req.isLocked 
-                                    ? `<span class="text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30 px-2 py-0.5 rounded"><i class="fa-solid fa-lock mr-1"></i>Admin Locked</span>`
-                                    : (isPrimary 
-                                        ? `<span class="text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded">Primary Slot Holder</span>` 
-                                        : `<span class="text-[10px] font-bold bg-slate-800 text-slate-400 px-2 py-0.5 rounded">Alternate #${idx}</span>`)
-                                }
-                            </div>
-                            <div class="flex items-center gap-2">
-                                ${window.isAdminAuthenticated ? `<span class="text-xs font-mono text-amber-400 font-bold mr-2">Score: ${req.score.toFixed(1)}</span>` : ''}
-                                ${window.isAdminAuthenticated ? `
-                                    <button onclick="toggleLockSubmission('${req.docId}', ${!req.isLocked})" class="px-2 py-1 text-[11px] font-bold rounded transition-all ${req.isLocked ? 'bg-amber-500 text-slate-950 hover:bg-amber-400' : 'bg-slate-800 hover:bg-slate-700 text-slate-300'}">
-                                        <i class="fa-solid ${req.isLocked ? 'fa-lock' : 'fa-lock-open'} mr-1"></i> ${req.isLocked ? 'Unlock' : 'Lock Primary'}
-                                    </button>
-                                ` : ''}
-                            </div>
-                        </div>
-                        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 bg-slate-900/80 p-2.5 rounded-lg border border-slate-800 text-xs text-slate-300">
-                            <div>
-                                <span class="text-[10px] text-slate-500 block uppercase">${speedupLabel} Speedups</span>
-                                <span class="font-semibold text-cyan-400">${req.specific || 0} Days</span>
-                            </div>
-                            <div>
-                                <span class="text-[10px] text-slate-500 block uppercase">General Speedups</span>
-                                <span class="font-semibold text-cyan-400">${req.general || 0} Days</span>
-                            </div>
-                            ${window.currentDay === 1 ? `
-                                <div>
-                                    <span class="text-[10px] text-slate-500 block uppercase">Fire Crystals</span>
-                                    <span class="font-semibold text-amber-400">${req.fc || 0} Units</span>
-                                </div>
-                            ` : ''}
-                        </div>
-                    `;
-                    container.appendChild(card);
-                });
-            }
-
-            document.getElementById('slotDetailModal').classList.remove('hidden');
-        };
-
-        window.toggleLockSubmission = async function(docId, shouldLock) {
-            if (!currentUser || !docId) return;
-            try {
-                const docRef = doc(db, 'artifacts', appId, 'public', 'data', `requests_day_${window.currentDay}`, docId);
-                await setDoc(docRef, { isLocked: shouldLock }, { merge: true });
-                closeSlotDetailModal();
-            } catch (err) {
-                console.error("Error setting slot lock status:", err);
-            }
-        };
-
-        window.closeSlotDetailModal = function() {
-            document.getElementById('slotDetailModal').classList.add('hidden');
-        };
-
-        function populateModalTimeSelect() {
-            const select = document.getElementById('slotSelect');
-            select.innerHTML = '';
-            for (let i = 0; i < 48; i++) {
-                const opt = document.createElement('option');
-                opt.value = i;
-                opt.innerText = formatSlotTime(i);
-                select.appendChild(opt);
-            }
-        }
-
-        window.openRequestModal = function() {
-            document.getElementById('requestModal').classList.remove('hidden');
-        };
-
-        window.closeRequestModal = function() {
-            document.getElementById('requestModal').classList.add('hidden');
-        };
-
-        window.handleRequestSubmit = async function(e) {
-            e.preventDefault();
-            if (!currentUser) return;
-
-            const playerName = document.getElementById('playerName').value;
-            const allianceTag = document.getElementById('allianceTag').value;
-            const slotIndex = parseInt(document.getElementById('slotSelect').value);
-            const specific = parseFloat(document.getElementById('specificSpeedups').value || 0);
-            const general = parseFloat(document.getElementById('generalSpeedups').value || 0);
-            const fc = parseFloat(document.getElementById('fireCrystals').value || 0);
-
-            const computedScore = calculateScore(window.currentDay, specific, general, fc);
-
-            const newRequest = {
-                playerName,
-                allianceTag,
-                slotIndex,
-                specific,
-                general,
-                fc,
-                score: computedScore,
-                timestamp: Date.now(),
-                userId: currentUser.uid,
-                isLocked: false
-            };
-
-            // Check if submission displaces an existing unlocked primary slot holder
-            const currentSlotRequests = scheduleData[window.currentDay][slotIndex] || [];
-            const currentSorted = [...currentSlotRequests].sort((a, b) => {
-                if (a.isLocked && !b.isLocked) return -1;
-                if (!a.isLocked && b.isLocked) return 1;
-                return b.score - a.score || a.timestamp - b.timestamp;
-            });
-
-            const currentPrimary = currentSorted[0];
-
-            if (currentPrimary && !currentPrimary.isLocked && computedScore > currentPrimary.score) {
-                pendingSubmissionData = newRequest;
-                document.getElementById('bumpedPlayerName').innerText = `[${currentPrimary.allianceTag}] ${currentPrimary.playerName}`;
-                document.getElementById('bumpedPlayerTag').innerText = `[${currentPrimary.allianceTag}] ${currentPrimary.playerName}`;
-                document.getElementById('bumpAlertModal').classList.remove('hidden');
-            } else {
-                await saveSubmissionToFirestore(newRequest);
-            }
-        };
-
-        window.confirmBumpSubmission = async function() {
-            if (pendingSubmissionData) {
-                await saveSubmissionToFirestore(pendingSubmissionData);
-                pendingSubmissionData = null;
-            }
-            document.getElementById('bumpAlertModal').classList.add('hidden');
-        };
-
-        async function saveSubmissionToFirestore(requestObject) {
-            try {
-                const colRef = collection(db, 'artifacts', appId, 'public', 'data', `requests_day_${window.currentDay}`);
-                await addDoc(colRef, requestObject);
-                closeRequestModal();
-                document.getElementById('slotForm').reset();
-            } catch (err) {
-                console.error("Error saving request to Firestore:", err);
-            }
-        }
-
-        // --- Admin Portal Logic ---
-        window.toggleAdminModal = function() {
-            document.getElementById('adminModal').classList.toggle('hidden');
-        };
-
-        window.verifyAdmin = function() {
-            const passkey = document.getElementById('adminPasskey').value;
-            if (passkey === 'WOS4336') {
-                window.isAdminAuthenticated = true;
-                document.getElementById('adminAuthSection').classList.add('hidden');
-                document.getElementById('adminDashboardSection').classList.remove('hidden');
-                document.getElementById('adminBtnText').innerText = "Admin (Active)";
-                renderSlotsGrid();
+            renderSlotsGrid();
+            if (window.isAdminAuthenticated) {
                 renderAdminSubmissions();
             }
         };
 
-        window.logoutAdmin = function() {
-            window.isAdminAuthenticated = false;
-            document.getElementById('adminAuthSection').classList.remove('hidden');
-            document.getElementById('adminDashboardSection').classList.add('hidden');
-            document.getElementById('adminBtnText').innerText = "Admin Portal";
-            renderSlotsGrid();
-        };
+        function updateSignupWindowUI() {
+            const badge = document.getElementById('signupWindowBadge');
+            const notice = document.getElementById('signupWindowNotice');
+            const btn = document.getElementById('requestBuffBtn');
+            const { nowUtc, windows } = getSvSTimings();
+            const windowInfo = windows[window.currentDay];
 
+            if (!windowInfo) return;
+
+            const isOpen = nowUtc >= windowInfo.start && nowUtc <= windowInfo.end;
+            const startStr = formatTimestampToDisplay(windowInfo.start);
+            const endStr = formatTimestampToDisplay(windowInfo.end);
+            const rangeText = `${startStr} – ${endStr}`;
+
+            if (isOpen) {
+                if (badge) {
+                    badge.className = "text-xs font-semibold px-2 py-0.5 rounded border border-emerald-500/40 bg-emerald-950/60 text-emerald-400";
+                    badge.innerHTML = `<i class="fa-solid fa-lock-open mr-1"></i> Sign-Ups OPEN (${rangeText})`;
+                }
+                if (notice) {
+                    notice.innerText = `Sign-up window is currently active (${rangeText}). Submit your resources to lock in or alternate for a slot.`;
+                }
+                if (btn) {
+                    btn.disabled = false;
+                    btn.className = "w-full md:w-auto px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold rounded-lg shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2 transition-all cursor-pointer";
+                }
+            } else {
+                if (badge) {
+                    badge.className = "text-xs font-semibold px-2 py-0.5 rounded border border-amber-500/40 bg-amber-950/60 text-amber-400";
+                    badge.innerHTML = `<i class="fa-solid fa-lock mr-1"></i> Window Opens: ${rangeText}`;
+                }
+                if (notice) {
+                    notice.innerText = `Sign-ups for Day ${window.currentDay} open ${rangeText}. You can view slots below; submissions will unlock during the window.`;
+                }
+                if (btn) {
+                    btn.disabled = !window.isAdminAuthenticated;
+                    if (window.isAdminAuthenticated) {
+                        btn.className = "w-full md:w-auto px-5 py-2.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg shadow-lg flex items-center justify-center gap-2 transition-all cursor-pointer";
+                    } else {
+                        btn.className = "w-full md:w-auto px-5 py-2.5 bg-slate-800 text-slate-500 font-bold rounded-lg flex items-center justify-center gap-2 cursor-not-allowed opacity-60";
+                    }
+                }
+            }
+        }
+
+        // --- Helper & Utility Functions ---
+        function updateSyncIndicator(online, customMessage) {
+            const el = document.getElementById('syncStatus');
+            if (!el) return;
+            if (online) {
+                el.className = "flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-lg";
+                el.innerHTML = `<i class="fa-solid fa-cloud-check"></i><span>Synced Live</span>`;
+            } else {
+                const msg = customMessage || "Connecting...";
+                el.className = "flex items-center gap-1.5 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg";
+                el.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i><span>${msg}</span>`;
+            }
+        }
+        // Admin Score Breakdown View
         function renderAdminSubmissions() {
             const list = document.getElementById('adminSubmissionsList');
+            if (!list) return;
             list.innerHTML = '';
 
             let hasEntries = false;
@@ -922,6 +581,209 @@
             }
         }
 
+        // Populates time select options in modal dropdown
+        function populateModalTimeSelect() {
+            const select = document.getElementById('slotSelect');
+            if (!select) return;
+            select.innerHTML = '';
+            for (let i = 0; i < 48; i++) {
+                const option = document.createElement('option');
+                option.value = i;
+                option.textContent = formatSlotTime(i);
+                select.appendChild(option);
+            }
+        }
+
+        // Switch between Day 1, Day 4, Day 5 tabs
+        window.switchDay = function(day) {
+            window.currentDay = day;
+            
+            const titles = {
+                1: "City Construction",
+                4: "Troop Training",
+                5: "Research"
+            };
+
+            const specificLabels = {
+                1: "Building Speedups (Days)",
+                4: "Troop Training Speedups (Days)",
+                5: "Research Speedups (Days)"
+            };
+
+            document.getElementById('currentDayTitle').innerText = `Day ${day}: ${titles[day]}`;
+            document.getElementById('modalDaySubtitle').innerText = `Day ${day}: ${titles[day]}`;
+            document.getElementById('specificSpeedupLabel').innerText = specificLabels[day];
+
+            const fcField = document.getElementById('fireCrystalField');
+            if (day === 1) {
+                fcField.classList.remove('hidden');
+            } else {
+                fcField.classList.add('hidden');
+            }
+
+            [1, 4, 5].forEach(d => {
+                const tab = document.getElementById(`dayTab${d}`);
+                if (tab) {
+                    if (d === day) {
+                        tab.className = "p-3 sm:p-4 rounded-xl border transition-all text-left flex flex-col justify-between bg-slate-800/90 border-cyan-500 glow-ice";
+                    } else {
+                        tab.className = "p-3 sm:p-4 rounded-xl border transition-all text-left flex flex-col justify-between bg-slate-900 border-slate-800 hover:border-slate-700";
+                    }
+                }
+            });
+
+            updateSignupWindowUI();
+            renderSlotsGrid();
+            if (window.isAdminAuthenticated) {
+                renderAdminSubmissions();
+            }
+        };
+
+        // Render the 48-slot schedule cards
+        function renderSlotsGrid() {
+            const grid = document.getElementById('slotsGrid');
+            if (!grid) return;
+            grid.innerHTML = '';
+
+            for (let slot = 0; slot < 48; slot++) {
+                const requests = scheduleData[window.currentDay][slot] || [];
+                const sorted = [...requests].sort((a, b) => {
+                    if (a.isLocked && !b.isLocked) return -1;
+                    if (!a.isLocked && b.isLocked) return 1;
+                    return b.score - a.score || a.timestamp - b.timestamp;
+                });
+
+                const primary = sorted[0];
+                const alternates = sorted.slice(1);
+
+                const card = document.createElement('div');
+                card.className = "bg-slate-900 border border-slate-800 rounded-xl p-3 shadow-md hover:border-slate-700 transition-all cursor-pointer flex flex-col justify-between";
+                card.onclick = () => openSlotDetailModal(slot);
+
+                let primaryHtml = '';
+                if (primary) {
+                    primaryHtml = `
+                        <div class="flex items-center justify-between bg-slate-950 p-2 rounded-lg border border-cyan-500/30">
+                            <div class="flex items-center gap-2">
+                                <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+                                <span class="text-xs font-bold text-white">[${primary.allianceTag}] ${primary.playerName}</span>
+                            </div>
+                            ${primary.isLocked ? '<span class="text-[10px] text-amber-400 font-semibold px-1.5 py-0.5 bg-amber-950/60 rounded border border-amber-800"><i class="fa-solid fa-lock"></i> Locked</span>' : '<span class="text-[10px] text-emerald-400 font-semibold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800">Primary</span>'}
+                        </div>
+                    `;
+                } else {
+                    primaryHtml = `
+                        <div class="p-2 bg-slate-950/40 rounded-lg text-center text-xs text-slate-500 border border-dashed border-slate-800">
+                            No requests submitted
+                        </div>
+                    `;
+                }
+
+                let altBadgeHtml = '';
+                if (alternates.length > 0) {
+                    altBadgeHtml = `<span class="text-[11px] text-amber-400 font-medium">${alternates.length} Waitlisted</span>`;
+                }
+
+                card.innerHTML = `
+                    <div>
+                        <div class="flex justify-between items-center mb-2 pb-2 border-b border-slate-800">
+                            <span class="font-mono font-bold text-xs text-cyan-400">${formatSlotTime(slot)}</span>
+                            ${altBadgeHtml}
+                        </div>
+                        ${primaryHtml}
+                    </div>
+                    <div class="mt-2 pt-2 border-t border-slate-800/60 flex justify-between items-center text-[11px] text-slate-500">
+                        <span>Click details</span>
+                        <i class="fa-solid fa-chevron-right text-[10px]"></i>
+                    </div>
+                `;
+
+                grid.appendChild(card);
+            }
+        }
+
+        // Open Slot Detail View Modal
+        function openSlotDetailModal(slotIndex) {
+            const modal = document.getElementById('slotDetailModal');
+            const timeEl = document.getElementById('detailModalTime');
+            const dayEl = document.getElementById('detailModalDay');
+            const container = document.getElementById('detailEntriesContainer');
+
+            if (!modal || !timeEl || !container) return;
+
+            timeEl.innerText = formatSlotTime(slotIndex);
+            dayEl.innerText = `Day ${window.currentDay}`;
+            container.innerHTML = '';
+
+            const requests = scheduleData[window.currentDay][slotIndex] || [];
+            const sorted = [...requests].sort((a, b) => {
+                if (a.isLocked && !b.isLocked) return -1;
+                if (!a.isLocked && b.isLocked) return 1;
+                return b.score - a.score || a.timestamp - b.timestamp;
+            });
+
+            if (sorted.length === 0) {
+                container.innerHTML = `<div class="p-4 text-center text-xs text-slate-500 bg-slate-950/50 rounded-xl border border-slate-800">No requests submitted for this slot.</div>`;
+            } else {
+                sorted.forEach((req, idx) => {
+                    const isPrimary = idx === 0;
+                    const card = document.createElement('div');
+                    card.className = `p-3 rounded-xl border ${isPrimary ? 'bg-slate-950 border-cyan-500/40' : 'bg-slate-950/60 border-slate-800'} flex justify-between items-center`;
+
+                    let lockBtn = '';
+                    if (window.isAdminAuthenticated) {
+                        lockBtn = `
+                            <button onclick="toggleLockSubmission('${req.docId}', ${!req.isLocked})" class="px-2 py-1 text-[11px] bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded hover:bg-amber-500/30">
+                                ${req.isLocked ? '<i class="fa-solid fa-unlock"></i> Unlock' : '<i class="fa-solid fa-lock"></i> Lock Slot'}
+                            </button>
+                        `;
+                    }
+
+                    let statusBadge = isPrimary 
+                        ? `<span class="text-xs font-bold text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">Primary Holder</span>` 
+                        : `<span class="text-xs font-bold text-amber-400 bg-amber-950 px-2 py-0.5 rounded border border-amber-800">Alternate #${idx}</span>`;
+
+                    card.innerHTML = `
+                        <div class="space-y-1">
+                            <div class="flex items-center gap-2">
+                                <span class="font-bold text-sm text-white">[${req.allianceTag}] ${req.playerName}</span>
+                                ${statusBadge}
+                                ${req.isLocked ? '<span class="text-[10px] text-amber-400 font-semibold px-1.5 py-0.5 bg-amber-950 rounded border border-amber-800"><i class="fa-solid fa-lock"></i> Locked</span>' : ''}
+                            </div>
+                            <div class="text-xs text-slate-400">
+                                <span>Specific Speedups: <strong>${req.specific}d</strong></span> • 
+                                <span>General Speedups: <strong>${req.general}d</strong></span>
+                                ${window.currentDay === 1 ? ` • <span>Fire Crystals: <strong>${req.fc}</strong></span>` : ''}
+                            </div>
+                            ${window.isAdminAuthenticated ? `<div class="text-xs text-amber-400 font-mono">Raw Score: ${req.score.toFixed(2)}</div>` : ''}
+                        </div>
+                        <div>
+                            ${lockBtn}
+                        </div>
+                    `;
+                    container.appendChild(card);
+                });
+            }
+
+            modal.classList.remove('hidden');
+        }
+
+        window.closeSlotDetailModal = function() {
+            const modal = document.getElementById('slotDetailModal');
+            if (modal) modal.classList.add('hidden');
+        };
+
+        window.toggleLockSubmission = async function(docId, shouldLock) {
+            if (!currentUser || !docId) return;
+            try {
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', `requests_day_${window.currentDay}`, docId);
+                await updateDoc(docRef, { isLocked: shouldLock });
+                window.closeSlotDetailModal();
+            } catch (err) {
+                console.error("Error locking document:", err);
+            }
+        };
+
         window.deleteSubmission = async function(docId) {
             if (!currentUser || !docId) return;
             try {
@@ -952,11 +814,79 @@
             }
         };
 
+        // Initialize Firebase Authentication listener and real-time Firestore synchronization
+        function initAuth() {
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    currentUser = user;
+                    updateSyncIndicator(true);
+                } else {
+                    try {
+                        const userCred = await signInAnonymously(auth);
+                        currentUser = userCred.user;
+                        updateSyncIndicator(true);
+                    } catch (err) {
+                        console.error("Firebase auth error:", err);
+                        updateSyncIndicator(false, "Auth Error");
+                    }
+                }
+                setupFirestoreListeners();
+            });
+        }
+
+        function setupFirestoreListeners() {
+            [1, 4, 5].forEach(day => {
+                const colRef = collection(db, 'artifacts', appId, 'public', 'data', `requests_day_${day}`);
+                onSnapshot(colRef, (snapshot) => {
+                    localFallbackMode = false;
+                    const rawRequests = [];
+                    snapshot.forEach(docSnap => {
+                        rawRequests.push({ docId: docSnap.id, ...docSnap.data() });
+                    });
+
+                    // Group into 48 time slots
+                    const slotsMap = Array.from({ length: 48 }, () => []);
+                    rawRequests.forEach(req => {
+                        if (req.slotIndex >= 0 && req.slotIndex < 48) {
+                            slotsMap[req.slotIndex].push(req);
+                        }
+                    });
+
+                    scheduleData[day] = slotsMap;
+
+                    if (day === window.currentDay) {
+                        renderSlotsGrid();
+                        if (window.isAdminAuthenticated) {
+                            renderAdminSubmissions();
+                        }
+                    }
+                    updateSyncIndicator(true);
+                }, (err) => {
+                    console.warn(`Firestore listener permission/access error on Day ${day}:`, err.message);
+                    localFallbackMode = true;
+                    updateSyncIndicator(false, "Local Mode (Rules Pending)");
+                    
+                    // Try to load any locally saved offline data so the app remains interactive
+                    try {
+                        const localSaved = localStorage.getItem(`wos_day_${day}`);
+                        if (localSaved) {
+                            scheduleData[day] = JSON.parse(localSaved);
+                            if (day === window.currentDay) {
+                                renderSlotsGrid();
+                            }
+                        }
+                    } catch(e) {
+                        console.error("Local storage read error", e);
+                    }
+                });
+            });
+        }
+
         // Initialize Firebase Auth & Component UI
         window.currentDay = getInitialSmartDay();
         initAuth();
-        window.switchDay(window.currentDay);
         populateModalTimeSelect();
+        window.switchDay(window.currentDay);
     </script>
 </body>
 </html>
